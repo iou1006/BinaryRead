@@ -161,7 +161,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void OpenFile(string path)
+    public void OpenFile(string path)
     {
         try
         {

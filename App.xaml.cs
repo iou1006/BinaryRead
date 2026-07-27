@@ -1,13 +1,20 @@
-﻿using System.Configuration;
-using System.Data;
-using System.Windows;
+﻿using System.Windows;
 
 namespace BinaryRead;
 
-/// <summary>
-/// Interaction logic for App.xaml
-/// </summary>
 public partial class App : Application
 {
+    protected override void OnStartup(StartupEventArgs e)
+    {
+        base.OnStartup(e);
+
+        var window = new MainWindow();
+        window.Show();
+
+        if (e.Args.Length > 0)
+        {
+            window.OpenFile(e.Args[0]);
+        }
+    }
 }
 
