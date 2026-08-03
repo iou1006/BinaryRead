@@ -1,19 +1,21 @@
-﻿using System.Windows;
+﻿using System;
+using System.Windows;
 
-namespace BinaryRead;
-
-public partial class App : Application
+namespace BinaryRead
 {
-    protected override void OnStartup(StartupEventArgs e)
+    public partial class App : Application
     {
-        base.OnStartup(e);
-
-        var window = new MainWindow();
-        window.Show();
-
-        if (e.Args.Length > 0)
+        protected override void OnStartup(StartupEventArgs e)
         {
-            window.OpenFile(e.Args[0]);
+            base.OnStartup(e);
+
+            var window = new MainWindow();
+            window.Show();
+
+            if (e.Args.Length > 0)
+            {
+                window.OpenFile(e.Args[0]);
+            }
         }
     }
 }

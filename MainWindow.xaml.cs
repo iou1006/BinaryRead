@@ -1,4 +1,5 @@
-﻿using System.Globalization;
+﻿using System;
+using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -6,7 +7,8 @@ using System.Windows.Input;
 using System.Windows.Threading;
 using Microsoft.Win32;
 
-namespace BinaryRead;
+namespace BinaryRead
+{
 
 /// <summary>
 /// Interaction logic for MainWindow.xaml
@@ -28,7 +30,7 @@ public partial class MainWindow : Window
         InitializeComponent();
 
         _refreshDebounce = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(400) };
-        _refreshDebounce.Tick += (_, _) =>
+        _refreshDebounce.Tick += (s, e) =>
         {
             _refreshDebounce.Stop();
             RefreshFromDisk();
@@ -65,7 +67,7 @@ public partial class MainWindow : Window
 
     private void AutoRefreshCheck_Changed(object sender, RoutedEventArgs e)
     {
-        if (_watcher is not null)
+        if (_watcher != null)
         {
             _watcher.EnableRaisingEvents = AutoRefreshCheck.IsChecked == true;
         }
@@ -109,7 +111,7 @@ public partial class MainWindow : Window
         string text = JumpBox.Text.Trim();
         if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
         {
-            text = text[2..];
+            text = text.Substring(2);
         }
 
         if (!long.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out long target)
@@ -155,7 +157,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (e.Data.GetData(DataFormats.FileDrop) is string[] { Length: > 0 } files)
+        if (e.Data.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0)
         {
             OpenFile(files[0]);
         }
@@ -215,11 +217,11 @@ public partial class MainWindow : Window
 
     private void OnFileChanged(object sender, FileSystemEventArgs e)
     {
-        Dispatcher.BeginInvoke(() =>
+        Dispatcher.BeginInvoke((Action)(() =>
         {
             _refreshDebounce.Stop();
             _refreshDebounce.Start();
-        });
+        }));
     }
 
     private void RefreshFromDisk()
@@ -280,7 +282,13 @@ public partial class MainWindow : Window
                 fs.Seek(_pageOffset, SeekOrigin.Begin);
                 if (toRead > 0)
                 {
-                    fs.ReadExactly(buffer, 0, toRead);
+                    int offset = 0;
+                    while (offset < toRead)
+                    {
+                        int n = fs.Read(buffer, offset, toRead - offset);
+                        if (n == 0) break;
+                        offset += n;
+                    }
                 }
             }
 
@@ -292,11 +300,11 @@ public partial class MainWindow : Window
 
             if (preserveScroll)
             {
-                Dispatcher.BeginInvoke(() =>
+                Dispatcher.BeginInvoke((Action)(() =>
                 {
                     DumpScroll.ScrollToVerticalOffset(vOffset);
                     DumpScroll.ScrollToHorizontalOffset(hOffset);
-                }, DispatcherPriority.Loaded);
+                }), DispatcherPriority.Loaded);
             }
             else
             {
@@ -391,4 +399,5 @@ public partial class MainWindow : Window
         _watcher?.Dispose();
         base.OnClosed(e);
     }
+}
 }
