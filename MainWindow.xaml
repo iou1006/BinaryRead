@@ -5,8 +5,24 @@
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:local="clr-namespace:BinaryRead"
         mc:Ignorable="d"
-        Title="二进制文件查看器 (.dat)" Height="640" Width="660" MinWidth="520"
-        AllowDrop="True" DragOver="Window_DragOver" Drop="Window_Drop">
+        Title="二进制文件查看器 (.dat)" Height="640" Width="800" MinWidth="600"
+        AllowDrop="True" DragOver="Window_DragOver" Drop="Window_Drop"
+        Closing="Window_Closing">
+    <Window.CommandBindings>
+        <CommandBinding Command="Save" Executed="SaveCommand_Executed" />
+        <CommandBinding Command="Undo" Executed="UndoCommand_Executed" />
+        <CommandBinding Command="Redo" Executed="RedoCommand_Executed" />
+    </Window.CommandBindings>
+    <Window.InputBindings>
+        <KeyBinding Key="S" Modifiers="Ctrl" Command="Save" />
+        <KeyBinding Key="S" Modifiers="Ctrl+Shift" Command="{x:Static local:MainWindow.SaveAsCommand}" />
+        <KeyBinding Key="Z" Modifiers="Ctrl" Command="Undo" />
+        <KeyBinding Key="Y" Modifiers="Ctrl" Command="Redo" />
+        <KeyBinding Key="G" Modifiers="Ctrl" Command="{x:Static local:MainWindow.JumpCommand}" />
+        <KeyBinding Key="R" Modifiers="Ctrl" Command="{x:Static local:MainWindow.RefreshCommand}" />
+        <KeyBinding Key="Delete" Command="{x:Static local:MainWindow.DeleteByteCommand}" />
+        <KeyBinding Key="Insert" Command="{x:Static local:MainWindow.InsertByteCommand}" />
+    </Window.InputBindings>
     <Window.Resources>
         <Style x:Key="DumpColumn" TargetType="TextBox">
             <Setter Property="IsReadOnly" Value="True" />
@@ -32,39 +48,58 @@
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
-            <Button x:Name="SelectButton" Content="选择文件..." Padding="14,6"
+        <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,4">
+            <Button x:Name="SelectButton" Content="选择文件..." Padding="10,4"
                     Click="SelectButton_Click" />
-            <Button x:Name="CopyButton" Content="复制本页" Padding="14,6" Margin="8,0,0,0"
+            <Button x:Name="CopyButton" Content="复制本页" Padding="10,4" Margin="6,0,0,0"
                     Click="CopyButton_Click" IsEnabled="False" />
-            <Button x:Name="RefreshButton" Content="刷新" Padding="14,6" Margin="8,0,0,0"
+            <Button x:Name="RefreshButton" Content="刷新" Padding="10,4" Margin="6,0,0,0"
                     Click="RefreshButton_Click" IsEnabled="False" />
             <CheckBox x:Name="AutoRefreshCheck" Content="自动刷新" VerticalAlignment="Center"
-                      Margin="10,0,0,0" IsEnabled="False"
+                      Margin="8,0,0,0" IsEnabled="False"
                       Checked="AutoRefreshCheck_Changed" Unchecked="AutoRefreshCheck_Changed" />
-            <TextBlock x:Name="FileInfoText" VerticalAlignment="Center" Margin="14,0,0,0"
-                       Foreground="#555" Text="将 .dat 文件拖到此窗口，或点击“选择文件...”" />
+            <TextBlock x:Name="FileInfoText" VerticalAlignment="Center" Margin="12,0,0,0"
+                       Foreground="#555" Text="将文件拖到此窗口，或点击「选择文件...」" />
         </StackPanel>
 
-        <StackPanel x:Name="NavPanel" Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8"
+        <StackPanel x:Name="EditPanel" Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,4"
                     IsEnabled="False">
-            <Button x:Name="PrevButton" Content="◀ 上一页" Padding="10,4" Click="PrevButton_Click" />
-            <Button x:Name="NextButton" Content="下一页 ▶" Padding="10,4" Margin="6,0,0,0"
+            <Button x:Name="SaveButton" Content="💾 保存" Padding="8,4"
+                    Click="SaveButton_Click" />
+            <Button x:Name="SaveAsButton" Content="另存为..." Padding="8,4" Margin="4,0,0,0"
+                    Click="SaveAsButton_Click" />
+            <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="6,2" />
+            <Button x:Name="InsertButton" Content="插入00" Padding="8,4" Margin="0,0,0,0"
+                    Click="InsertButton_Click" />
+            <Button x:Name="DeleteButton" Content="删除字节" Padding="8,4" Margin="4,0,0,0"
+                    Click="DeleteButton_Click" />
+            <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="6,2" />
+            <Button x:Name="UndoButton" Content="↩ 撤销" Padding="8,4"
+                    Click="UndoButton_Click" />
+            <Button x:Name="RedoButton" Content="↪ 重做" Padding="8,4" Margin="4,0,0,0"
+                    Click="RedoButton_Click" />
+        </StackPanel>
+
+        <StackPanel x:Name="NavPanel" Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,4"
+                    IsEnabled="False">
+            <Button x:Name="PrevButton" Content="◀ 上一页" Padding="8,4" Click="PrevButton_Click" />
+            <Button x:Name="NextButton" Content="下一页 ▶" Padding="8,4" Margin="4,0,0,0"
                     Click="NextButton_Click" />
-            <TextBlock x:Name="PageInfoText" VerticalAlignment="Center" Margin="12,0,0,0"
+            <TextBlock x:Name="PageInfoText" VerticalAlignment="Center" Margin="10,0,0,0"
                        Foreground="#555" Text="第 0 / 0 页" />
-            <TextBlock Text="跳转偏移(hex):" VerticalAlignment="Center" Margin="18,0,4,0" />
+            <TextBlock Text="跳转偏移(hex):" VerticalAlignment="Center" Margin="14,0,4,0" />
             <TextBox x:Name="JumpBox" Width="120" VerticalAlignment="Center" Padding="4,3"
                      KeyDown="JumpBox_KeyDown" />
-            <Button x:Name="JumpButton" Content="跳转" Padding="10,4" Margin="6,0,0,0"
+            <Button x:Name="JumpButton" Content="跳转" Padding="8,4" Margin="4,0,0,0"
                     Click="JumpButton_Click" />
         </StackPanel>
 
-        <Border Grid.Row="2" BorderBrush="#CCC" BorderThickness="1" Background="#FBFBFB">
+        <Border Grid.Row="3" BorderBrush="#CCC" BorderThickness="1" Background="#FBFBFB">
             <ScrollViewer x:Name="HScroll"
                           HorizontalScrollBarVisibility="Auto"
                           VerticalScrollBarVisibility="Disabled">
@@ -108,7 +143,12 @@
                             <TextBox x:Name="OffsetBox" Grid.Column="0" Style="{StaticResource DumpColumn}"
                                      Foreground="#0066AA" />
                             <Rectangle Grid.Column="1" Width="1" Fill="#E0E0E0" VerticalAlignment="Stretch" />
-                            <TextBox x:Name="HexBox" Grid.Column="2" Style="{StaticResource DumpColumn}" />
+                            <TextBox x:Name="HexBox" Grid.Column="2" Style="{StaticResource DumpColumn}"
+                                     IsReadOnly="False" AcceptsReturn="True" AcceptsTab="False"
+                                     PreviewTextInput="HexBox_PreviewTextInput"
+                                     PreviewKeyDown="HexBox_PreviewKeyDown"
+                                     TextChanged="HexBox_TextChanged"
+                                     SelectionChanged="HexBox_SelectionChanged" />
                             <Rectangle Grid.Column="3" Width="1" Fill="#E0E0E0" VerticalAlignment="Stretch" />
                             <TextBox x:Name="AsciiBox" Grid.Column="4" Style="{StaticResource DumpColumn}"
                                      Foreground="#227722" />
@@ -118,9 +158,13 @@
             </ScrollViewer>
         </Border>
 
-        <StatusBar Grid.Row="3" Margin="0,8,0,0">
+        <StatusBar Grid.Row="4" Margin="0,4,0,0">
             <StatusBarItem>
                 <TextBlock x:Name="StatusText" Text="就绪" />
+            </StatusBarItem>
+            <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" />
+            <StatusBarItem>
+                <TextBlock x:Name="ByteInfoText" Text="" />
             </StatusBarItem>
         </StatusBar>
     </Grid>
