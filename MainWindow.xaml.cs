@@ -35,14 +35,23 @@ public partial class MainWindow : Window
 
     private byte[] _originalData = Array.Empty<byte>();
     private bool _isDirty;
+    private bool _parseError;
     private bool _isSyncing;
     private string _baseTitle;
 
     private byte[]? _delimiter;
     private int[] _byteToTextPos = Array.Empty<int>();
-    private List<long> _searchResults = new List<long>();
+
+    private readonly List<long> _searchResults = new List<long>();
     private int _searchIndex = -1;
     private byte[] _searchPattern = Array.Empty<byte>();
+    private bool _searchInProgress;
+    private FileStream? _searchStream;
+    private long _searchFileLengthAtScan;
+    private long _searchScannedBytes;
+    private byte[] _searchChunk = Array.Empty<byte>();
+    private byte[] _searchCarry = Array.Empty<byte>();
+    private int _searchCarryCount;
 
     public MainWindow()
     {
@@ -179,20 +188,23 @@ public partial class MainWindow : Window
     #endregion
 
     #region Save Logic
+    // 保存一律使用 _originalData（字节级数据模型），
+    // HexBox 中的显示换行（含分隔符格式化换行）只是空白字符，永远不会写入文件。
 
     private void SaveFile()
     {
         if (_filePath is null || !_isDirty) return;
 
+        if (_parseError)
+        {
+            MessageBox.Show(this, "Hex 区域存在无法解析的内容，请修正后再保存。", "保存失败",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         try
         {
-            byte[]? pageData = ParseHexText(HexBox.Text);
-            if (pageData is null)
-            {
-                MessageBox.Show(this, "Hex 区域存在无效字符，请修正后再保存。", "保存失败",
-                    MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
+            byte[] pageData = _originalData;
 
             if (pageData.Length == _originalData.Length)
             {
@@ -241,6 +253,13 @@ public partial class MainWindow : Window
     {
         if (_filePath is null) return;
 
+        if (_parseError)
+        {
+            MessageBox.Show(this, "Hex 区域存在无法解析的内容，请修正后再保存。", "保存失败",
+                MessageBoxButton.OK, MessageBoxImage.Warning);
+            return;
+        }
+
         var dialog = new SaveFileDialog
         {
             Title = "另存为",
@@ -252,13 +271,7 @@ public partial class MainWindow : Window
         {
             try
             {
-                byte[]? pageData = ParseHexText(HexBox.Text);
-                if (pageData is null)
-                {
-                    MessageBox.Show(this, "Hex 区域存在无效字符，请修正后再保存。", "保存失败",
-                        MessageBoxButton.OK, MessageBoxImage.Warning);
-                    return;
-                }
+                byte[] pageData = _originalData;
 
                 byte[] entireFile = File.ReadAllBytes(_filePath);
                 int fileLen = entireFile.Length;
@@ -305,11 +318,8 @@ public partial class MainWindow : Window
             Array.Copy(_originalData, byteIndex, newData, byteIndex + 1, _originalData.Length - byteIndex);
             _originalData = newData;
 
-            RenderBytes(newData);
+            RenderFromData(byteIndex + 1);
             MarkDirty();
-
-            int newCursor = ByteIndexToCursor(HexBox.Text, byteIndex) + 2;
-            HexBox.CaretIndex = Math.Min(newCursor, HexBox.Text.Length);
             HexBox.Focus();
         }
     }
@@ -335,11 +345,8 @@ public partial class MainWindow : Window
             Array.Copy(_originalData, byteIndex + 1, newData, byteIndex, _originalData.Length - byteIndex - 1);
             _originalData = newData;
 
-            RenderBytes(newData);
+            RenderFromData(byteIndex);
             MarkDirty();
-
-            int newCursor = ByteIndexToCursor(HexBox.Text, byteIndex);
-            HexBox.CaretIndex = Math.Min(newCursor, HexBox.Text.Length);
             HexBox.Focus();
         }
     }
@@ -352,22 +359,38 @@ public partial class MainWindow : Window
     {
         if (_isSyncing) return;
 
+        byte[]? bytes = ParseHexText(HexBox.Text);
+        if (bytes is null)
+        {
+            _parseError = true;
+            StatusText.Text = "Hex 区域存在无法解析的内容，保存已被禁止";
+            return;
+        }
+        _parseError = false;
+
+        int caretByte = CursorToByteIndex(HexBox.Text, HexBox.CaretIndex);
+        _originalData = bytes;
+
         _isSyncing = true;
         try
         {
-            byte[]? bytes = ParseHexText(HexBox.Text);
-            if (bytes != null)
+            if (_delimiter != null)
             {
-                _originalData = bytes;
-                string ascii = BytesToAsciiText(bytes);
-                AsciiBox.Text = ascii;
-                MarkDirty();
+                // 分隔符模式：整体重渲染保持三列行结构一致，并恢复光标
+                RenderFromData(caretByte);
+            }
+            else
+            {
+                AsciiBox.Text = BytesToAsciiText(bytes);
+                _byteToTextPos = BuildByteToTextPos(bytes.Length);
             }
         }
         finally
         {
             _isSyncing = false;
         }
+
+        MarkDirty();
     }
 
     private void HexBox_PreviewTextInput(object sender, TextCompositionEventArgs e)
@@ -423,7 +446,7 @@ public partial class MainWindow : Window
 
     #endregion
 
-    #region Search
+    #region Search (page-by-page incremental scan)
 
     private void SearchButton_Click(object sender, RoutedEventArgs e) => DoSearch();
 
@@ -437,13 +460,15 @@ public partial class MainWindow : Window
         {
             DoSearch();
         }
-        else if (e.Key == Key.F3 && (Keyboard.Modifiers & ModifierKeys.Shift) != 0)
+    }
+
+    private void CancelSearch()
+    {
+        _searchInProgress = false;
+        if (_searchStream != null)
         {
-            SearchPrev();
-        }
-        else if (e.Key == Key.F3)
-        {
-            SearchNext();
+            _searchStream.Dispose();
+            _searchStream = null;
         }
     }
 
@@ -458,35 +483,144 @@ public partial class MainWindow : Window
             return;
         }
 
+        CancelSearch();
+
         _searchPattern = pattern;
-        _searchResults = FindAllMatches(pattern);
+        _searchResults.Clear();
+        _searchIndex = -1;
+        _searchScannedBytes = 0;
+        _searchCarryCount = 0;
+        _searchCarry = new byte[Math.Max(0, pattern.Length - 1)];
+
+        if (_isDirty)
+        {
+            StatusText.Text = "注意：搜索基于已保存的文件内容（当前有未保存修改）";
+        }
+
+        try
+        {
+            _searchStream = new FileStream(_filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            _searchFileLengthAtScan = _searchStream.Length;
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = string.Format("搜索失败：{0}", ex.Message);
+            return;
+        }
+
+        _searchChunk = new byte[PageSize];
+        _searchInProgress = true;
+        SearchInfoText.Text = "扫描中 0%";
+        Dispatcher.BeginInvoke(new Action(ProcessSearchChunk), DispatcherPriority.Background);
+    }
+
+    // 逐页（每次 512KB）扫描，页与页之间让出 UI 线程，避免卡顿
+    private void ProcessSearchChunk()
+    {
+        if (!_searchInProgress || _searchStream is null) return;
+
+        byte[] pattern = _searchPattern;
+        int n;
+        try
+        {
+            n = _searchStream.Read(_searchChunk, 0, _searchChunk.Length);
+        }
+        catch (Exception ex)
+        {
+            StatusText.Text = string.Format("搜索失败：{0}", ex.Message);
+            FinishSearch();
+            return;
+        }
+
+        if (n <= 0)
+        {
+            FinishSearch();
+            return;
+        }
+
+        if (pattern.Length > 0)
+        {
+            var scan = new byte[_searchCarryCount + n];
+            Array.Copy(_searchCarry, 0, scan, 0, _searchCarryCount);
+            Array.Copy(_searchChunk, 0, scan, _searchCarryCount, n);
+
+            long baseOffset = _searchScannedBytes - _searchCarryCount;
+            for (int i = 0; i + pattern.Length <= scan.Length; i++)
+            {
+                bool match = true;
+                for (int j = 0; j < pattern.Length; j++)
+                {
+                    if (scan[i + j] != pattern[j]) { match = false; break; }
+                }
+                if (match) _searchResults.Add(baseOffset + i);
+            }
+
+            int newCarry = Math.Min(pattern.Length - 1, scan.Length);
+            for (int i = 0; i < newCarry; i++)
+                _searchCarry[i] = scan[scan.Length - newCarry + i];
+            _searchCarryCount = newCarry;
+        }
+
+        _searchScannedBytes += n;
+
+        if (_searchResults.Count == 1 && _searchIndex == -1)
+        {
+            _searchIndex = 0;
+            GoToSearchResult(0);
+        }
+
+        if (_searchScannedBytes < _searchFileLengthAtScan)
+        {
+            int pct = (int)(_searchScannedBytes * 100 / Math.Max(1, _searchFileLengthAtScan));
+            SearchInfoText.Text = string.Format("扫描中 {0}%   已找到 {1}", pct, _searchResults.Count);
+            Dispatcher.BeginInvoke(new Action(ProcessSearchChunk), DispatcherPriority.Background);
+        }
+        else
+        {
+            FinishSearch();
+        }
+    }
+
+    private void FinishSearch()
+    {
+        CancelSearch();
 
         if (_searchResults.Count == 0)
         {
-            _searchIndex = -1;
             SearchInfoText.Text = "无匹配";
             StatusText.Text = "未找到匹配项";
             return;
         }
 
-        _searchIndex = 0;
-        GoToSearchResult(0);
+        if (_searchIndex == -1)
+        {
+            _searchIndex = 0;
+            GoToSearchResult(0);
+        }
+
+        SearchInfoText.Text = string.Format("共 {0} 处匹配   当前 {1}",
+            _searchResults.Count, _searchIndex + 1);
+        StatusText.Text = string.Format("搜索完成，共 {0} 处匹配", _searchResults.Count);
     }
 
     private void SearchNext()
     {
         if (_searchResults.Count == 0)
         {
-            if (_searchPattern.Length > 0)
+            if (_searchPattern.Length > 0 && !_searchInProgress)
             {
-                _searchResults = FindAllMatches(_searchPattern);
-                if (_searchResults.Count > 0)
-                {
-                    _searchIndex = 0;
-                    GoToSearchResult(0);
-                }
+                DoSearch();
+            }
+            else if (_searchInProgress)
+            {
+                StatusText.Text = "仍在扫描，请稍候…";
             }
             return;
+        }
+
+        if (_searchIndex == _searchResults.Count - 1 && _searchInProgress)
+        {
+            StatusText.Text = "仍在扫描更多匹配，请稍候…";
         }
 
         _searchIndex = (_searchIndex + 1) % _searchResults.Count;
@@ -497,14 +631,9 @@ public partial class MainWindow : Window
     {
         if (_searchResults.Count == 0)
         {
-            if (_searchPattern.Length > 0)
+            if (_searchPattern.Length > 0 && !_searchInProgress)
             {
-                _searchResults = FindAllMatches(_searchPattern);
-                if (_searchResults.Count > 0)
-                {
-                    _searchIndex = _searchResults.Count - 1;
-                    GoToSearchResult(_searchIndex);
-                }
+                DoSearch();
             }
             return;
         }
@@ -516,8 +645,17 @@ public partial class MainWindow : Window
     private void GoToSearchResult(int index)
     {
         long offset = _searchResults[index];
+        long targetPage = offset / PageSize * PageSize;
+
+        if (targetPage != _pageOffset && !ConfirmDiscard())
+        {
+            return;
+        }
+
         SelectMatch(offset, _searchPattern.Length);
-        SearchInfoText.Text = string.Format("{0} / {1}", index + 1, _searchResults.Count);
+        SearchInfoText.Text = _searchInProgress
+            ? string.Format("扫描中…   当前 {0} / 已找到 {1}", index + 1, _searchResults.Count)
+            : string.Format("{0} / {1}", index + 1, _searchResults.Count);
         StatusText.Text = string.Format("匹配位置 0x{0:X}", offset);
     }
 
@@ -578,58 +716,9 @@ public partial class MainWindow : Window
         return Encoding.ASCII.GetBytes(trimmed);
     }
 
-    private List<long> FindAllMatches(byte[] pattern)
-    {
-        var results = new List<long>();
-        if (pattern.Length == 0 || _filePath is null) return results;
-
-        const int chunkSize = 1024 * 1024;
-        var chunk = new byte[chunkSize];
-        var carry = new byte[pattern.Length - 1];
-        int carryCount = 0;
-        long baseOffset = 0;
-
-        try
-        {
-            using (var fs = new FileStream(_filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            {
-                int read;
-                while ((read = fs.Read(chunk, 0, chunkSize)) > 0)
-                {
-                    var scan = new byte[carryCount + read];
-                    Array.Copy(carry, 0, scan, 0, carryCount);
-                    Array.Copy(chunk, 0, scan, carryCount, read);
-
-                    for (int i = 0; i + pattern.Length <= scan.Length; i++)
-                    {
-                        bool match = true;
-                        for (int j = 0; j < pattern.Length; j++)
-                        {
-                            if (scan[i + j] != pattern[j]) { match = false; break; }
-                        }
-                        if (match) results.Add(baseOffset - carryCount + i);
-                    }
-
-                    int newCarry = Math.Min(pattern.Length - 1, scan.Length);
-                    for (int i = 0; i < newCarry; i++)
-                        carry[i] = scan[scan.Length - newCarry + i];
-                    carryCount = newCarry;
-
-                    baseOffset += read;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            StatusText.Text = string.Format("搜索失败：{0}", ex.Message);
-        }
-
-        return results;
-    }
-
     #endregion
 
-    #region Delimiter Formatting
+    #region Delimiter Formatting (display-only)
 
     private void ApplyDelimiterButton_Click(object sender, RoutedEventArgs e) => ApplyDelimiter();
 
@@ -661,9 +750,15 @@ public partial class MainWindow : Window
         }
 
         _delimiter = delim;
-        ReRenderCurrentBuffer(preserveScroll: true);
-        DelimiterInfoText.Text = string.Format("分隔符: {0} ({1} 字节)", text, delim.Length);
-        StatusText.Text = "已应用换行分隔符";
+        DelimiterInfoText.Text = string.Format("分隔符: {0} ({1} 字节)  —  仅显示，不写入文件", text, delim.Length);
+
+        // 分页渲染：先让 UI 响应，再后台重绘当前页
+        StatusText.Text = "正在应用格式化…";
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            ReRenderCurrentBuffer(preserveScroll: true);
+            StatusText.Text = "已应用换行分隔符（仅显示）";
+        }), DispatcherPriority.Background);
     }
 
     private void ClearDelimiter()
@@ -766,18 +861,6 @@ public partial class MainWindow : Window
         return sb.ToString();
     }
 
-    private static string BytesToHexText(byte[] bytes)
-    {
-        var sb = new StringBuilder(bytes.Length * 3);
-        for (int i = 0; i < bytes.Length; i++)
-        {
-            sb.Append(bytes[i].ToString("X2"));
-            if (i < bytes.Length - 1)
-                sb.Append(' ');
-        }
-        return sb.ToString();
-    }
-
     private static int CursorToByteIndex(string hexText, int cursorPos)
     {
         if (string.IsNullOrEmpty(hexText) || cursorPos <= 0) return 0;
@@ -796,60 +879,6 @@ public partial class MainWindow : Window
         return byteCount;
     }
 
-    private static int ByteIndexToCursor(string hexText, int targetByteIndex)
-    {
-        if (string.IsNullOrEmpty(hexText) || targetByteIndex <= 0) return 0;
-
-        int byteCount = 0;
-        int hexChars = 0;
-        for (int i = 0; i < hexText.Length; i++)
-        {
-            if (byteCount >= targetByteIndex) return i;
-
-            char c = hexText[i];
-            if (IsHexDigit(c))
-            {
-                hexChars++;
-                if (hexChars % 2 == 0) byteCount++;
-            }
-        }
-        return hexText.Length;
-    }
-
-    private static int IndexOfSubset(byte[] bytes, byte[] pattern, int start, int endExclusive)
-    {
-        int limit = Math.Min(endExclusive, bytes.Length - pattern.Length + 1);
-        for (int i = start; i < limit; i++)
-        {
-            bool match = true;
-            for (int j = 0; j < pattern.Length; j++)
-            {
-                if (bytes[i + j] != pattern[j]) { match = false; break; }
-            }
-            if (match) return i;
-        }
-        return -1;
-    }
-
-    #endregion
-
-    #region Render
-
-    private void RenderBytes(byte[] bytes)
-    {
-        _isSyncing = true;
-        try
-        {
-            HexBox.Text = BytesToHexText(bytes);
-            AsciiBox.Text = BytesToAsciiText(bytes);
-            _byteToTextPos = BuildByteToTextPos(bytes.Length);
-        }
-        finally
-        {
-            _isSyncing = false;
-        }
-    }
-
     private static int[] BuildByteToTextPos(int byteCount)
     {
         var map = new int[byteCount];
@@ -858,12 +887,34 @@ public partial class MainWindow : Window
         return map;
     }
 
-    private void MarkDirty()
+    #endregion
+
+    #region Render
+
+    // 以 _originalData 为唯一数据源统一渲染三列（含分隔符换行），并重建字节↔文本映射。
+    // 显示换行只存在于 TextBox 文本中；保存时一律使用 _originalData，不受影响。
+    private void RenderFromData(int? caretByte = null)
     {
-        if (!_isDirty && _filePath != null)
+        _isSyncing = true;
+        try
         {
-            _isDirty = true;
-            UpdateTitle();
+            var (offsetText, hexText, asciiText, full, byteToTextPos) =
+                BuildHexDump(_originalData, _pageOffset, _delimiter);
+            _byteToTextPos = byteToTextPos;
+            OffsetBox.Text = offsetText;
+            HexBox.Text = hexText;
+            AsciiBox.Text = asciiText;
+            _pageDump = full;
+
+            if (caretByte.HasValue && _byteToTextPos.Length > 0)
+            {
+                int idx = Math.Min(Math.Max(caretByte.Value, 0), _byteToTextPos.Length - 1);
+                HexBox.CaretIndex = Math.Min(_byteToTextPos[idx] + 2, HexBox.Text.Length);
+            }
+        }
+        finally
+        {
+            _isSyncing = false;
         }
     }
 
@@ -873,15 +924,9 @@ public partial class MainWindow : Window
 
         double vOffset = DumpScroll.VerticalOffset;
         double hOffset = DumpScroll.HorizontalOffset;
+        int caretByte = CursorToByteIndex(HexBox.Text, HexBox.CaretIndex);
 
-        var (offsetText, hexText, asciiText, full, byteToTextPos) = BuildHexDump(_originalData, _pageOffset, _delimiter);
-        _byteToTextPos = byteToTextPos;
-        OffsetBox.Text = offsetText;
-        _isSyncing = true;
-        HexBox.Text = hexText;
-        AsciiBox.Text = asciiText;
-        _isSyncing = false;
-        _pageDump = full;
+        RenderFromData(caretByte);
 
         if (preserveScroll)
         {
@@ -894,6 +939,15 @@ public partial class MainWindow : Window
         else
         {
             DumpScroll.ScrollToHome();
+        }
+    }
+
+    private void MarkDirty()
+    {
+        if (!_isDirty && _filePath != null)
+        {
+            _isDirty = true;
+            UpdateTitle();
         }
     }
 
@@ -930,6 +984,7 @@ public partial class MainWindow : Window
 
             _originalData = buffer;
             _isDirty = false;
+            _parseError = false;
             UpdateTitle();
 
             var (offsetText, hexText, asciiText, full, byteToTextPos) = BuildHexDump(buffer, _pageOffset, _delimiter);
@@ -972,6 +1027,11 @@ public partial class MainWindow : Window
         }
     }
 
+    // 换行规则：
+    //  1) 每行最多 BytesPerLine 字节；
+    //  2) 行内（不含行首）一旦匹配到分隔符，则在该分隔符“之前”换行——分隔符成为下一行行首；
+    //  3) 分隔符已在行首时不额外换行（扫描从 pos+1 开始）。
+    // 同时构建 byteToTextPos 映射（字节索引 → HexBox 文本位置），供搜索定位选区使用。
     private static (string offset, string hex, string ascii, string full, int[] byteToTextPos) BuildHexDump(
         byte[] bytes, long baseOffset, byte[]? delimiter)
     {
@@ -989,14 +1049,25 @@ public partial class MainWindow : Window
         int pos = 0;
         while (pos < bytes.Length)
         {
-            int searchEnd = Math.Min(pos + BytesPerLine, bytes.Length);
-            int delim = delimiter != null ? IndexOfSubset(bytes, delimiter, pos, searchEnd) : -1;
+            int lineEnd = Math.Min(pos + BytesPerLine, bytes.Length);
 
-            int lineEnd;
-            if (delim >= 0)
-                lineEnd = delim + delimiter!.Length;
-            else
-                lineEnd = searchEnd;
+            if (delimiter != null && delimiter.Length > 0)
+            {
+                int limit = Math.Min(lineEnd, bytes.Length - delimiter.Length + 1);
+                for (int i = pos + 1; i < limit; i++)
+                {
+                    bool match = true;
+                    for (int j = 0; j < delimiter.Length; j++)
+                    {
+                        if (bytes[i + j] != delimiter[j]) { match = false; break; }
+                    }
+                    if (match)
+                    {
+                        lineEnd = i;
+                        break;
+                    }
+                }
+            }
 
             long absolute = baseOffset + pos;
             offsetSb.Append(absolute.ToString("X8")).Append('\n');
@@ -1134,6 +1205,8 @@ public partial class MainWindow : Window
 
     private void Window_Closing(object sender, System.ComponentModel.CancelEventArgs e)
     {
+        CancelSearch();
+
         if (_isDirty)
         {
             var result = MessageBox.Show(this, "有未保存的修改，是否在关闭前保存？", "确认",
@@ -1163,15 +1236,17 @@ public partial class MainWindow : Window
                 return;
             }
 
+            CancelSearch();
+            _searchResults.Clear();
+            _searchIndex = -1;
+            SearchInfoText.Text = "";
+
             _filePath = path;
             _fileLength = info.Length;
             _pageOffset = 0;
             _delimiter = null;
             DelimiterBox.Text = "";
             DelimiterInfoText.Text = "";
-            _searchResults.Clear();
-            _searchIndex = -1;
-            SearchInfoText.Text = "";
 
             FileInfoText.Text = string.Format("{0}   ({1:N0} 字节)", info.Name, _fileLength);
             NavPanel.IsEnabled = _fileLength > 0;
@@ -1262,6 +1337,7 @@ public partial class MainWindow : Window
     protected override void OnClosed(EventArgs e)
     {
         _refreshDebounce.Stop();
+        CancelSearch();
         if (_watcher != null)
         {
             _watcher.Dispose();

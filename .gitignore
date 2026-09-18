@@ -17,3 +17,6 @@ obj/
 node_modules/
 package.json
 package-lock.json
+
+## Local tool config
+.opencode/
