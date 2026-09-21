@@ -102,6 +102,11 @@
                      KeyDown="JumpBox_KeyDown" />
             <Button x:Name="JumpButton" Content="跳转" Padding="8,4" Margin="4,0,0,0"
                     Click="JumpButton_Click" />
+            <TextBlock Text="跳转页:" VerticalAlignment="Center" Margin="14,0,4,0" />
+            <TextBox x:Name="PageBox" Width="60" VerticalAlignment="Center" Padding="4,3"
+                     KeyDown="PageBox_KeyDown" />
+            <Button x:Name="GoToPageButton" Content="跳转页" Padding="8,4" Margin="4,0,0,0"
+                    Click="GoToPageButton_Click" />
         </StackPanel>
 
         <StackPanel x:Name="SearchPanel" Grid.Row="3" Orientation="Horizontal" Margin="0,0,0,4"

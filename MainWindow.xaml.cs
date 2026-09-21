@@ -1136,6 +1136,33 @@ public partial class MainWindow : Window
 
     private void JumpButton_Click(object sender, RoutedEventArgs e) => JumpToOffset();
 
+    private void PageBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            GoToPage();
+        }
+    }
+
+    private void GoToPageButton_Click(object sender, RoutedEventArgs e) => GoToPage();
+
+    private void GoToPage()
+    {
+        if (_filePath is null) return;
+        if (!ConfirmDiscard()) return;
+
+        string text = PageBox.Text.Trim();
+        if (!long.TryParse(text, out long page) || page < 1 || page > PageCount)
+        {
+            MessageBox.Show(this, string.Format("无效的页码（有效范围 1 - {0}）。", PageCount), "提示",
+                MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        _pageOffset = (page - 1) * PageSize;
+        RenderPage();
+    }
+
     private void JumpBox_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Enter)
